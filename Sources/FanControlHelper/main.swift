@@ -1,4 +1,5 @@
 import Foundation
+import IOKit.pwr_mgt
 import SMCKit
 
 // Privileged fan helper. Runs as root under launchd and accepts line commands on a
@@ -48,6 +49,8 @@ var lastCommand = Date()
 var clients: [Int32: DispatchSourceRead] = [:]
 var buffers: [Int32: Data] = [:]
 
+var systemSleeping = false
+
 func log(_ s: String) { print("[\(Date())] \(s)") }
 
 func restoreAuto(_ reason: String) {
@@ -71,6 +74,8 @@ func handle(_ line: String) -> String {
         let hi = smc.readNumber("F\(fan)Mx") ?? 10000
         // 0 means "let the fan stop" (MacBook fans idle at 0 rpm); anything else is clamped.
         let clamped = rpm <= 0 ? 0 : min(max(rpm, lo), hi)
+        // While the system is going to sleep, ignore speed requests so the SMC stays on auto.
+        if systemSleeping { return "OK paused" }
         do {
             try smc.setFan(fan, rpm: clamped)
             anyManual = true
@@ -166,6 +171,45 @@ for sig in [SIGTERM, SIGINT, SIGHUP] {
     }
     s.resume()
     _ = Unmanaged.passRetained(s as AnyObject)
+}
+
+// MARK: System sleep
+//
+// Manual fan mode lives in the SMC and survives sleep, while this process and the app are
+// frozen, so a fan left at a fixed speed would keep spinning with the lid closed.
+// Hand control back to macOS before sleep and refuse SETs until the system is fully on.
+
+let kMsgCanSystemSleep: UInt32 = 0xE000_0270
+let kMsgSystemWillSleep: UInt32 = 0xE000_0280
+let kMsgSystemWillPowerOn: UInt32 = 0xE000_0320
+let kMsgSystemHasPoweredOn: UInt32 = 0xE000_0300
+
+var powerPort: io_connect_t = 0
+var powerNotifier: io_object_t = 0
+var powerNotifyPort: IONotificationPortRef?
+
+powerPort = IORegisterForSystemPower(nil, &powerNotifyPort, { _, _, messageType, messageArgument in
+    switch messageType {
+    case kMsgCanSystemSleep:
+        IOAllowPowerChange(powerPort, Int(bitPattern: messageArgument))
+    case kMsgSystemWillSleep:
+        systemSleeping = true
+        anyManual = true          // force a reset even if we think we're already on auto
+        restoreAuto("system sleep")
+        IOAllowPowerChange(powerPort, Int(bitPattern: messageArgument))
+    case kMsgSystemHasPoweredOn:
+        if systemSleeping { log("system woke") }
+        systemSleeping = false
+        lastCommand = Date()
+    default:
+        break
+    }
+}, &powerNotifier)
+
+if powerPort != 0, let p = powerNotifyPort {
+    IONotificationPortSetDispatchQueue(p, queue)
+} else {
+    log("warning: could not register for sleep notifications")
 }
 
 log("FanControlHelper listening on \(socketPath), \(smc.fanCount()) fan(s)")

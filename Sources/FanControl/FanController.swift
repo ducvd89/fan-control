@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SMCKit
 
@@ -67,6 +68,31 @@ final class FanController {
         }
         timer?.tolerance = 0.2
         checkHelper()
+
+        // Hand the fans back to macOS before sleep; the helper does the same on its side.
+        let ws = NSWorkspace.shared.notificationCenter
+        ws.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.systemWillSleep() }
+        }
+        ws.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.systemDidWake() }
+        }
+    }
+
+    /// True between sleep and wake; the curve is not applied while set.
+    private(set) var asleep = false
+
+    private func systemWillSleep() {
+        asleep = true
+        commandedRPM = [:]
+        currentLevel = nil
+        if helper.isInstalled { helper.sendAndWait("AUTO") }
+    }
+
+    private func systemDidWake() {
+        asleep = false
+        smoothedTemp = nil          // start fresh: temperatures changed while we were asleep
+        tick()
     }
 
     func checkHelper() {
@@ -128,7 +154,7 @@ final class FanController {
         smoothedTemp = prev + alpha * (t - prev)
 
         let profile = store.active
-        guard !profile.isSystem, let temp = smoothedTemp else { currentLevel = nil; return }
+        guard !profile.isSystem, !asleep, let temp = smoothedTemp else { currentLevel = nil; return }
         guard helperState == .ok || helperState == .unknown else {
             if helper.isInstalled { checkHelper() }
             return

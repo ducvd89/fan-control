@@ -11,7 +11,7 @@ fi
 swift build -c release
 BIN="$(swift build -c release --show-bin-path)"
 
-VERSION="${VERSION:-1.0.0}"
+VERSION="${VERSION:-1.0.1}"
 APP="build/FanControl.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
